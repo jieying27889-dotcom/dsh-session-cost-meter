@@ -1,0 +1,4 @@
+# 组合层：把本包挂进宿主组合（bundle 层，随 profile 层栈加载，重启生效）。
+- insert:
+    - id: session-cost-meter
+      name: dsh-session-cost-meter

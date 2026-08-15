@@ -1,0 +1,33 @@
+{
+  "name": "dsh-session-cost-meter",
+  "description": "DSH 插件：会话标题栏费用胶囊（本轮/累计 API 费用 + 账户余额，支持官方峰谷计价）",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "index.mjs",
+  "exports": {
+    ".": "./index.mjs",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.mjs",
+    "client.js",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "license": "MIT",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "dsh-plugin",
+    "cost",
+    "billing",
+    "usage"
+  ]
+}
