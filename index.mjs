@@ -349,22 +349,15 @@ export function apply(ctx) {
   const webServer = ctx.webServer
   const balanceCache = { at: 0, value: null, lastGood: null, lastGoodAt: 0 }
   const projectCache = { key: null, at: 0, value: null }
+  const projectInFlight = new Map()
 
   function normCwd(p) {
     return String(p || '').replace(/[\\/]+$/, '').toLowerCase()
   }
 
-  function foldLiveSession(session) {
-    let state = initState()
-    const events = session && session.events
-    if (!Array.isArray(events)) return state
-    for (const event of events) state = fold(state, event)
-    return state
-  }
-
   async function computeProject(cwd) {
     const target = normCwd(cwd)
-    const ids = new Set()
+    const seen = new Set()
     const liveById = new Map()
     const svc = ctx.get('sessions')
     if (svc && typeof svc.list === 'function') {
@@ -372,45 +365,59 @@ export function apply(ctx) {
         for (const session of svc.list()) {
           if (session && normCwd(session.header && session.header.cwd) === target) {
             const id = String(session.id)
-            ids.add(id)
+            seen.add(id)
             liveById.set(id, session)
           }
         }
       } catch { /* 读不到活动会话则跳过 */ }
     }
+    let total = 0
+    const tokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+
+    function addCost(cost) {
+      if (!cost || typeof cost.totalCost !== 'number' || !Number.isFinite(cost.totalCost)) return
+      total += cost.totalCost
+      const t = cost.tokens
+      if (t && typeof t === 'object') {
+        tokens.input += fin(t.input)
+        tokens.output += fin(t.output)
+        tokens.cacheRead += fin(t.cacheRead)
+        tokens.cacheWrite += fin(t.cacheWrite)
+      }
+    }
+
+    // 活动会话：直接读实时投影快照（eager-drive 已维护，O(1)，不重放日志）
+    const projections = ctx.sessionProjections
+    if (projections && typeof projections.snapshot === 'function') {
+      for (const session of liveById.values()) {
+        try {
+          const snap = projections.snapshot(session)
+          if (snap && snap.values) addCost(snap.values.sessionCost)
+        } catch { /* 单个会话读取失败不影响整体 */ }
+      }
+    }
+
+    // 持久化会话：用零 IO 投影缓存读取，绝不 readSession 全量回放日志
     const persistence = ctx.get('sessionPersistence')
-    if (persistence && typeof persistence.list === 'function') {
+    let cache = null
+    try { cache = ctx.get('sessionProjectionCache') } catch { /* 未挂载则跳过持久化会话 */ }
+    if (persistence && typeof persistence.list === 'function' && cache && typeof cache.cachedSnapshot === 'function') {
       try {
         const headers = await persistence.list()
         for (const header of headers) {
-          if (header && normCwd(header.cwd) === target) ids.add(String(header.id))
+          if (!header || normCwd(header.cwd) !== target) continue
+          const id = String(header.id)
+          seen.add(id)
+          if (liveById.has(id)) continue // 活动会话已计入
+          try {
+            const cut = cache.cachedSnapshot(header)
+            if (cut && cut.values) addCost(cut.values.sessionCost)
+          } catch { /* 单会话缓存缺失/损坏则跳过 */ }
         }
       } catch { /* 持久化列表失败则只统计活动会话 */ }
     }
-    let total = 0
-    const tokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
-    for (const id of ids) {
-      try {
-        let state
-        const live = liveById.get(id)
-        if (live !== undefined) {
-          state = foldLiveSession(live)
-        } else {
-          const query = ctx.get('sessionQuery')
-          const snapshot = query && typeof query.readSession === 'function' ? await query.readSession(id) : null
-          const events = snapshot && Array.isArray(snapshot.events) ? snapshot.events : null
-          if (!events) continue
-          state = initState()
-          for (const event of events) state = fold(state, event)
-        }
-        total += state.total
-        tokens.input += state.tokens.input
-        tokens.output += state.tokens.output
-        tokens.cacheRead += state.tokens.cacheRead
-        tokens.cacheWrite += state.tokens.cacheWrite
-      } catch { /* 单个会话读取失败不影响整体 */ }
-    }
-    return { cwd, sessionCount: ids.size, projectCost: total, tokens }
+
+    return { cwd, sessionCount: seen.size, projectCost: total, tokens }
   }
 
   if (webServer && typeof webServer.register === 'function') {
@@ -450,11 +457,25 @@ export function apply(ctx) {
           if (projectCache.key === key && projectCache.value && now - projectCache.at < 30000) {
             return sendJson(res, 200, projectCache.value)
           }
-          const value = await computeProject(cwd)
-          projectCache.key = key
-          projectCache.at = now
-          projectCache.value = { ok: true, ...value }
-          return sendJson(res, 200, projectCache.value)
+          // 单飞：同一项目目录并发请求复用同一个在途计算，避免缓存击穿
+          let inflight = projectInFlight.get(key)
+          if (!inflight) {
+            inflight = (async () => {
+              try {
+                const value = await computeProject(cwd)
+                const cached = { ok: true, ...value }
+                projectCache.key = key
+                projectCache.at = Date.now()
+                projectCache.value = cached
+                return cached
+              } finally {
+                projectInFlight.delete(key)
+              }
+            })()
+            projectInFlight.set(key, inflight)
+          }
+          const value = await inflight
+          return sendJson(res, 200, value)
         } catch (error) {
           return sendJson(res, 500, { ok: false, error: String((error && error.message) || error).slice(0, 160) })
         }
