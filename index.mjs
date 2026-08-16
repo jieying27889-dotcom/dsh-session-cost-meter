@@ -348,8 +348,119 @@ export function apply(ctx) {
 
   const webServer = ctx.webServer
   const balanceCache = { at: 0, value: null, lastGood: null, lastGoodAt: 0 }
+  const projectCache = { key: null, at: 0, value: null }
+
+  function normCwd(p) {
+    return String(p || '').replace(/[\\/]+$/, '').toLowerCase()
+  }
+
+  function foldLiveSession(session) {
+    let state = initState()
+    const events = session && session.events
+    if (!Array.isArray(events)) return state
+    for (const event of events) state = fold(state, event)
+    return state
+  }
+
+  async function computeProject(cwd) {
+    const target = normCwd(cwd)
+    const ids = new Set()
+    const liveById = new Map()
+    const svc = ctx.get('sessions')
+    if (svc && typeof svc.list === 'function') {
+      try {
+        for (const session of svc.list()) {
+          if (session && normCwd(session.header && session.header.cwd) === target) {
+            const id = String(session.id)
+            ids.add(id)
+            liveById.set(id, session)
+          }
+        }
+      } catch { /* 读不到活动会话则跳过 */ }
+    }
+    const persistence = ctx.get('sessionPersistence')
+    if (persistence && typeof persistence.list === 'function') {
+      try {
+        const headers = await persistence.list()
+        for (const header of headers) {
+          if (header && normCwd(header.cwd) === target) ids.add(String(header.id))
+        }
+      } catch { /* 持久化列表失败则只统计活动会话 */ }
+    }
+    let total = 0
+    const tokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+    for (const id of ids) {
+      try {
+        let state
+        const live = liveById.get(id)
+        if (live !== undefined) {
+          state = foldLiveSession(live)
+        } else {
+          const query = ctx.get('sessionQuery')
+          const snapshot = query && typeof query.readSession === 'function' ? await query.readSession(id) : null
+          const events = snapshot && Array.isArray(snapshot.events) ? snapshot.events : null
+          if (!events) continue
+          state = initState()
+          for (const event of events) state = fold(state, event)
+        }
+        total += state.total
+        tokens.input += state.tokens.input
+        tokens.output += state.tokens.output
+        tokens.cacheRead += state.tokens.cacheRead
+        tokens.cacheWrite += state.tokens.cacheWrite
+      } catch { /* 单个会话读取失败不影响整体 */ }
+    }
+    return { cwd, sessionCount: ids.size, projectCost: total, tokens }
+  }
 
   if (webServer && typeof webServer.register === 'function') {
+    ctx.effect(() => webServer.register({
+      kind: 'exact',
+      path: '/plugins/session-cost-meter/project-total',
+      handler: async (req, res) => {
+        try {
+          const url = new URL(req.url || '/', 'http://x')
+          const sid = url.searchParams.get('sessionId') || ''
+          let cwd = null
+          const svc = ctx.get('sessions')
+          if (svc && typeof svc.list === 'function') {
+            try {
+              for (const session of svc.list()) {
+                if (String(session.id) === sid && session.header && typeof session.header.cwd === 'string') {
+                  cwd = session.header.cwd
+                  break
+                }
+              }
+            } catch { /* 继续 */ }
+          }
+          if (cwd === null) {
+            const persistence = ctx.get('sessionPersistence')
+            if (persistence && typeof persistence.list === 'function') {
+              try {
+                const headers = await persistence.list()
+                for (const header of headers) {
+                  if (header && String(header.id) === sid && typeof header.cwd === 'string') { cwd = header.cwd; break }
+                }
+              } catch { /* 继续 */ }
+            }
+          }
+          if (cwd === null) return sendJson(res, 200, { ok: false, error: '无法确定会话所属项目目录' })
+          const key = normCwd(cwd)
+          const now = Date.now()
+          if (projectCache.key === key && projectCache.value && now - projectCache.at < 30000) {
+            return sendJson(res, 200, projectCache.value)
+          }
+          const value = await computeProject(cwd)
+          projectCache.key = key
+          projectCache.at = now
+          projectCache.value = { ok: true, ...value }
+          return sendJson(res, 200, projectCache.value)
+        } catch (error) {
+          return sendJson(res, 500, { ok: false, error: String((error && error.message) || error).slice(0, 160) })
+        }
+      },
+    }))
+
     ctx.effect(() => webServer.register({
       kind: 'exact',
       path: '/plugins/session-cost-meter/pricing',

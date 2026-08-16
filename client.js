@@ -56,6 +56,9 @@ window.__ModuleLoader__.load({
       var errState = React.useState(null)
       var balanceError = errState[0]
       var setBalanceError = errState[1]
+      var projectState = React.useState(null)
+      var project = projectState[0]
+      var setProject = projectState[1]
 
       React.useEffect(function () {
         if (!sessionId) return
@@ -71,17 +74,31 @@ window.__ModuleLoader__.load({
         return function () { alive = false }
       }, [sessionId, turnEndsSize])
 
+      React.useEffect(function () {
+        if (!sessionId) return
+        var alive = true
+        fetch('/plugins/session-cost-meter/project-total?sessionId=' + encodeURIComponent(String(sessionId)))
+          .then(function (r) { return r.json() })
+          .then(function (v) {
+            if (alive && v && v.ok === true) setProject(v)
+          })
+          .catch(function () { if (alive) setProject(null) })
+        return function () { alive = false }
+      }, [sessionId, turnEndsSize])
+
       if (!sessionId) return null
       var currency = (cost && cost.currency) || 'CNY'
       var tracked = !!cost
       var turnCost = tracked ? (running ? cost.currentTurnCost : cost.lastTurnCost) : null
       var totalCost = tracked ? cost.totalCost : null
+      var projectCost = project && typeof project.projectCost === 'number' ? project.projectCost : null
       var balText = fmtBalanceText(balance)
       var errShort = balanceError ? String(balanceError).slice(0, 24) + (String(balanceError).length > 24 ? '…' : '') : null
       var balShown = balText !== null ? balText : (balanceError ? '不可用（' + errShort + '）' : '…')
       var detail = '会话费用统计（金额为估算，以账单为准）'
       if (tracked && cost.unknownPricing) detail += '；部分消息的模型没有对应价格'
       if (tracked && cost.tokens) detail += '；token 输入 ' + fmtTokens(cost.tokens.input) + ' / 输出 ' + fmtTokens(cost.tokens.output) + ' / 缓存读 ' + fmtTokens(cost.tokens.cacheRead)
+      if (project && typeof project.sessionCount === 'number') detail += '；项目含 ' + project.sessionCount + ' 个会话'
       if (balanceError) detail += '；余额错误：' + balanceError
       if (balance && balance.ok && balance.stale) detail += '；余额为上次成功值（刷新失败）'
 
@@ -89,6 +106,8 @@ window.__ModuleLoader__.load({
         React.createElement('span', null, '本轮 ', fmtCost(turnCost, currency)),
         React.createElement('span', { style: sepStyle }, '·'),
         React.createElement('span', null, '总计 ', fmtCost(totalCost, currency)),
+        React.createElement('span', { style: sepStyle }, '·'),
+        React.createElement('span', null, '项目 ', fmtCost(projectCost, currency)),
         React.createElement('span', { style: sepStyle }, '·'),
         React.createElement('span', null, '余额 ', balShown)
       )
