@@ -351,6 +351,12 @@ export function apply(ctx) {
   const projectCache = { key: null, at: 0, value: null }
   const projectInFlight = new Map()
 
+  // 任何会话的投影发生变化（新消息落地/价格重算）都作废项目缓存，下次请求即得最新合计。
+  // 计算本身是零 IO 的投影缓存求和，且请求侧有 30s 缓存 + single-flight，不会放大负载。
+  if (typeof ctx.sessionProjections.onChanged === 'function') {
+    ctx.effect(() => ctx.sessionProjections.onChanged(() => { projectCache.at = 0 }))
+  }
+
   function normCwd(p) {
     return String(p || '').replace(/[\\/]+$/, '').toLowerCase()
   }

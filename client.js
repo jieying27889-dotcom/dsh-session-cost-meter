@@ -84,7 +84,7 @@ window.__ModuleLoader__.load({
           })
           .catch(function () { if (alive) setProject(null) })
         return function () { alive = false }
-      }, [sessionId])
+      }, [sessionId, turnEndsSize])
 
       if (!sessionId) return null
       var currency = (cost && cost.currency) || 'CNY'
