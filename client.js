@@ -77,13 +77,18 @@ window.__ModuleLoader__.load({
       React.useEffect(function () {
         if (!sessionId) return
         var alive = true
-        fetch('/plugins/session-cost-meter/project-total?sessionId=' + encodeURIComponent(String(sessionId)))
-          .then(function (r) { return r.json() })
-          .then(function (v) {
-            if (alive && v && v.ok === true) setProject(v)
-          })
-          .catch(function () { if (alive) setProject(null) })
-        return function () { alive = false }
+        function loadProject() {
+          fetch('/plugins/session-cost-meter/project-total?sessionId=' + encodeURIComponent(String(sessionId)))
+            .then(function (r) { return r.json() })
+            .then(function (v) {
+              if (alive && v && v.ok === true) setProject(v)
+            })
+            .catch(function () { if (alive) setProject(null) })
+        }
+        loadProject()
+        // 10 秒轻量轮询：任务执行中「项目」也随动更新（服务端零 IO + 30s 缓存 + 单飞兜底）
+        var timer = setInterval(loadProject, 10000)
+        return function () { alive = false; clearInterval(timer) }
       }, [sessionId, turnEndsSize])
 
       if (!sessionId) return null
